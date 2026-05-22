@@ -253,6 +253,9 @@ def build_epub(
         book.add_item(phase_page)
         phase_pages[phase_dir] = f"phase_{phase_dir.replace('/', '_')}.xhtml"
 
+        # Add phase pages to the spine so readers can navigate to them.
+        book.spine.append(phase_page)
+
     # Build the nested TOC using tuple-based structure.
     toc: list = []
     for phase_dir in sorted(phase_dirs.keys()):
