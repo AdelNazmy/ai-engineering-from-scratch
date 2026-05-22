@@ -4,13 +4,8 @@
 Files are sorted by their full path so that content appears in sequential order
 following the traversal (phase 00 -> 01 -> ... -> 19).
 
-The TOC is nested: phase directories appear as parent sections with their
-chapters listed underneath, e.g.:
-
-    00-setup-and-tooling
-        01-dev-environment
-        02-git-and-collaboration
-        ...
+The TOC uses proper nested structure: phase directories appear as clickable
+parent entries, and each chapter is listed underneath its parent phase.
 """
 
 import argparse
@@ -113,54 +108,74 @@ def build_epub(
         book.add_item(chapter)
         book.spine.append(chapter)
 
-        # Flat TOC entry for every chapter.
-        toc_ref = epub.Link(
-            href=f"chapter_{i:04d}.xhtml",
-            title=title,
-            uid=f"toc_{i}",
-        )
-        book.toc.append(toc_ref)
-
         # Collect phase directory info for the nested nav TOC.
         rel = os.path.relpath(md_path)
         parts = rel.split(os.sep)
         phase_dir = parts[0] if len(parts) > 1 else "__root__"
         phase_dirs.setdefault(phase_dir, []).append((i, title))
 
-    # Build the nested HTML nav so the reader sees phase groups.
-    nav_parts: list[str] = [
-        "<nav epub:type='toc' id='toc'>",
-        '<h2>Table of Contents</h2>',
-        "<ol>",
-    ]
+    # Build individual HTML pages for each phase header.
+    phase_pages: dict[str, str] = {}
     for phase_dir in sorted(phase_dirs.keys()):
-        display_name = phase_dir
         chapters = phase_dirs[phase_dir]
-        nav_parts.append(f"<li>{html_escape(display_name)}")
-        nav_parts.append("<ol>")
-        for idx, ch_title in chapters:
-            nav_parts.append(
-                f'<li><a href="chapter_{idx:04d}.xhtml">{html_escape(ch_title)}</a></li>'
+        first_chapter_idx = chapters[0][0]
+
+        page_html = f"""<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>{html_escape(phase_dir)}</title></head>
+<body>
+<h1>{html_escape(phase_dir)}</h1>
+<p>Chapters {first_chapter_idx + 1} to {first_chapter_idx + len(chapters)}: {len(chapters)} lessons</p>
+<nav>
+<a href="chapter_{first_chapter_idx:04d}.xhtml">Start reading &rarr;</a>
+</nav>
+</body>
+</html>"""
+
+        phase_page = epub.EpubHtml(
+            title=phase_dir,
+            file_name=f"phase_{phase_dir.replace('/', '_')}.xhtml",
+            content=page_html.encode("utf-8"),
+            uid=f"phase_{phase_dir}",
+        )
+        book.add_item(phase_page)
+        phase_pages[phase_dir] = f"phase_{phase_dir.replace('/', '_')}.xhtml"
+
+    # Build the nested TOC using tuple-based structure.
+    # ebooklib's _get_nav interprets tuples as (parent, [children]) for nesting.
+    toc: list = []
+    for phase_dir in sorted(phase_dirs.keys()):
+        chapters = phase_dirs[phase_dir]
+
+        # Phase header link -> children are the chapters under this phase.
+        toc.append(
+            (
+                epub.Link(
+                    href=phase_pages[phase_dir],
+                    title=phase_dir,
+                    uid=f"toc_phase_{phase_dir}",
+                ),
+                [
+                    epub.Link(
+                        href=f"chapter_{idx:04d}.xhtml",
+                        title=title,
+                        uid=f"toc_chap_{idx}",
+                    )
+                    for idx, title in chapters
+                ],
             )
-        nav_parts.append("</ol></li>")
+        )
 
-    nav_parts.append("</ol></nav>")
+    book.toc = toc  # Tuple-based nested structure drives both nav.xhtml and .ncx.
 
-    toc_nav = epub.EpubHtml(
-        title="Table of Contents",
-        file_name="nav.xhtml",
-        content="".join(nav_parts).encode("utf-8"),
-        uid="epubnav",
-        media_type="application/xhtml+xml",
-    )
-    book.add_item(toc_nav)
+    # Add EpubNav and EpubNcx so ebooklib writes nav.xhtml and toc.ncx to the archive.
+    nav_item = epub.EpubNav()
+    book.add_item(nav_item)
 
-    # Remove the default EpubNav that ebooklib generates so our custom nav is used.
-    for item in list(book.items):
-        if isinstance(item, epub.EpubNav):
-            book.remove_item(item.id)
+    ncx_item = epub.EpubNcx()
+    book.add_item(ncx_item)
 
-    # Write the EPUB file.
+    # Write the EPUB file — this auto-generates nav.xhtml and .ncx from book.toc.
     epub.write_epub(output_path, book)
     print(f"\nEPUB written to: {os.path.abspath(output_path)}")
     print(f"  Chapters : {len(md_files)}")
