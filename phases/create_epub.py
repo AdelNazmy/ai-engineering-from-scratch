@@ -4,12 +4,18 @@
 Files are sorted by their full path so that content appears in sequential order
 following the traversal (phase 00 -> 01 -> ... -> 19).
 
+Mermaid code blocks are automatically rendered to PNG images using @mermaid-js/mermaid-cli
+(mmdc) and embedded as <img> tags directly inside the EPUB archive.
+
 The TOC uses proper nested structure: phase directories appear as clickable
 parent entries, and each chapter is listed underneath its parent phase.
 """
 
 import argparse
+import hashlib
 import os
+import re
+import subprocess
 import sys
 from html import escape as html_escape
 
@@ -22,6 +28,10 @@ except ImportError:
     from ebooklib import epub
 
 import markdown
+
+
+# Path to mmdc binary (mermaid CLI)
+MMCDC_PATH = "/tmp/node_modules/.bin/mmdc"
 
 
 def find_en_md_files(root_dir: str) -> list[str]:
@@ -60,6 +70,82 @@ def extract_title(md_text: str) -> str:
     return "Untitled"
 
 
+def render_mermaid_to_png(mermaid_code: str) -> bytes | None:
+    """Render a single mermaid diagram to PNG.
+
+    Returns raw PNG bytes, or None if rendering fails.
+    """
+    try:
+        with open("/tmp/_mmd_input.mmd", "w") as f:
+            f.write(mermaid_code)
+
+        result = subprocess.run(
+            [
+                MMCDC_PATH,
+                "-i", "/tmp/_mmd_input.mmd",
+                "-o", "/tmp/_mmd_output.png",
+                "-b", "transparent",
+                "--height", "600",
+                "--width", "1200",
+                "-q",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+
+        if result.returncode != 0 or not os.path.exists("/tmp/_mmd_output.png"):
+            return None
+
+        with open("/tmp/_mmd_output.png", "rb") as f:
+            data = f.read()
+
+        if len(data) < 50:
+            return None
+
+        return data
+
+    except Exception as e:
+        print(f"  Mermaid render error: {e}")
+        return None
+
+
+def process_markdown_with_mermaid(md_text: str, book: epub.EpubBook) -> tuple[str, list[epub.EpubItem]]:
+    """Process markdown text, converting mermaid code blocks to <img> tags.
+
+    Returns (processed_html_string, list_of_image_items_to_add).
+    """
+    image_items = []
+
+    def replace_mermaid_block(match):
+        mermaid_code = match.group(1)
+        png_data = render_mermaid_to_png(mermaid_code.strip())
+
+        if png_data:
+            # Create a unique ID for this image in the EPUB
+            hash_key = hashlib.sha256(png_data).hexdigest()[:8]
+            img_id = f"mermaid_{hash_key}"
+            epub_img_name = f"{img_id}.png"
+
+            # Add image as an EpubItem (static item, not a chapter)
+            epub_img = epub.EpubItem(
+                uid=img_id,
+                file_name=f"images/{epub_img_name}",
+                media_type="image/png",
+                content=png_data,
+            )
+            book.add_item(epub_img)
+            image_items.append(epub_img)
+
+            return f'<div class="mermaid-figure"><img src="images/{epub_img_name}" alt="Diagram" style="max-width: 95%; height: auto; display: block; margin: 1em auto;"/></div>'
+        else:
+            # Fallback: keep the mermaid code as a styled pre block
+            return f'<pre style="background:#f6f8fa;padding:12px;border-radius:6px;font-family:monospace;"><code>{html_escape(mermaid_code.strip())}</code></pre>'
+
+    result = re.sub(r'```mermaid\s*\n(.*?)```', replace_mermaid_block, md_text, flags=re.DOTALL)
+    return result, image_items
+
+
 def build_epub(
     md_files: list[str],
     output_path: str,
@@ -81,13 +167,19 @@ def build_epub(
 
     # Collect phase directory -> list of (index, title) for the nested TOC.
     phase_dirs: dict[str, list[tuple[int, str]]] = {}
+    total_images = 0
 
     for i, md_path in enumerate(md_files):
         with open(md_path, encoding="utf-8") as fh:
             raw = fh.read()
 
         title = extract_title(raw)
-        html_body = md_to_html(raw)
+
+        # Process mermaid blocks -> convert to <img> tags and embed PNGs into EPUB
+        processed_md, image_items = process_markdown_with_mermaid(raw, book)
+        total_images += len(image_items)
+
+        html_body = md_to_html(processed_md)
 
         # Build a minimal HTML document wrapping the converted markdown.
         html_content = f"""<!DOCTYPE html>
@@ -142,12 +234,10 @@ def build_epub(
         phase_pages[phase_dir] = f"phase_{phase_dir.replace('/', '_')}.xhtml"
 
     # Build the nested TOC using tuple-based structure.
-    # ebooklib's _get_nav interprets tuples as (parent, [children]) for nesting.
     toc: list = []
     for phase_dir in sorted(phase_dirs.keys()):
         chapters = phase_dirs[phase_dir]
 
-        # Phase header link -> children are the chapters under this phase.
         toc.append(
             (
                 epub.Link(
@@ -179,6 +269,7 @@ def build_epub(
     epub.write_epub(output_path, book)
     print(f"\nEPUB written to: {os.path.abspath(output_path)}")
     print(f"  Chapters : {len(md_files)}")
+    print(f"  Mermaid images embedded: {total_images}")
 
 
 def main():
