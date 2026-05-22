@@ -4,17 +4,19 @@
 Files are sorted by their full path so that content appears in sequential order
 following the traversal (phase 00 -> 01 -> ... -> 19).
 
-Usage:
-    python create_epub.py [directory] [--output filename.epub]
+The TOC is nested: phase directories appear as parent sections with their
+chapters listed underneath, e.g.:
 
-If no directory is given, uses the current working directory.
+    00-setup-and-tooling
+        01-dev-environment
+        02-git-and-collaboration
+        ...
 """
 
 import argparse
 import os
 import sys
 from html import escape as html_escape
-from pathlib import Path
 
 
 try:
@@ -76,9 +78,14 @@ def build_epub(
     book.add_metadata("", "title", book_title)
     book.add_metadata("", "creator", "AI Engineering From Scratch")
     book.add_metadata("", "language", "en")
-    book.add_metadata("", "description", "Complete AI Engineering curriculum from scratch.")
+    book.add_metadata(
+        "",
+        "description",
+        "Complete AI Engineering curriculum from scratch.",
+    )
 
-    nav_added = False
+    # Collect phase directory -> list of (index, title) for the nested TOC.
+    phase_dirs: dict[str, list[tuple[int, str]]] = {}
 
     for i, md_path in enumerate(md_files):
         with open(md_path, encoding="utf-8") as fh:
@@ -106,7 +113,7 @@ def build_epub(
         book.add_item(chapter)
         book.spine.append(chapter)
 
-        # Build the TOC entry for this chapter.
+        # Flat TOC entry for every chapter.
         toc_ref = epub.Link(
             href=f"chapter_{i:04d}.xhtml",
             title=title,
@@ -114,16 +121,44 @@ def build_epub(
         )
         book.toc.append(toc_ref)
 
-    if not nav_added:
-        toc_nav = epub.EpubNav()
-        toc_nav.body = '<nav>'
-        for j, c in enumerate(md_files):
-            t = extract_title(open(c).read())
-            toc_nav.body += f'<ol><li><a href="chapter_{j:04d}.xhtml">{html_escape(t)}</a></li></ol>'
-        toc_nav.body += '</nav>'
-        toc_nav.filename = "nav.xhtml"
-        toc_nav.uid = "epubnav"
-        book.add_item(toc_nav)
+        # Collect phase directory info for the nested nav TOC.
+        rel = os.path.relpath(md_path)
+        parts = rel.split(os.sep)
+        phase_dir = parts[0] if len(parts) > 1 else "__root__"
+        phase_dirs.setdefault(phase_dir, []).append((i, title))
+
+    # Build the nested HTML nav so the reader sees phase groups.
+    nav_parts: list[str] = [
+        "<nav epub:type='toc' id='toc'>",
+        '<h2>Table of Contents</h2>',
+        "<ol>",
+    ]
+    for phase_dir in sorted(phase_dirs.keys()):
+        display_name = phase_dir
+        chapters = phase_dirs[phase_dir]
+        nav_parts.append(f"<li>{html_escape(display_name)}")
+        nav_parts.append("<ol>")
+        for idx, ch_title in chapters:
+            nav_parts.append(
+                f'<li><a href="chapter_{idx:04d}.xhtml">{html_escape(ch_title)}</a></li>'
+            )
+        nav_parts.append("</ol></li>")
+
+    nav_parts.append("</ol></nav>")
+
+    toc_nav = epub.EpubHtml(
+        title="Table of Contents",
+        file_name="nav.xhtml",
+        content="".join(nav_parts).encode("utf-8"),
+        uid="epubnav",
+        media_type="application/xhtml+xml",
+    )
+    book.add_item(toc_nav)
+
+    # Remove the default EpubNav that ebooklib generates so our custom nav is used.
+    for item in list(book.items):
+        if isinstance(item, epub.EpubNav):
+            book.remove_item(item.id)
 
     # Write the EPUB file.
     epub.write_epub(output_path, book)
@@ -135,7 +170,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Build an EPUB from all en.md files found recursively."
     )
-    parser.add_argument("directory", nargs="?", default=None, help="Root directory to search.")
+    parser.add_argument(
+        "directory", nargs="?", default=None, help="Root directory to search.",
+    )
     parser.add_argument("--output", "-o", default="ai-engineering-from-scratch.epub")
     args = parser.parse_args()
 
