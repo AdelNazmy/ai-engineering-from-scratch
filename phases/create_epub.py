@@ -181,6 +181,26 @@ def build_epub(
 
         html_body = md_to_html(processed_md)
 
+        # Inject table border CSS if this chapter contains a <table>.
+        if "<table>" in html_body:
+            css_block = """<style>
+  table {
+    border-collapse: collapse;
+    margin: 1em 0;
+    font-size: 0.95em;
+  }
+  th, td {
+    border: 1px solid #bbb;
+    padding: 6px 10px;
+    text-align: left;
+  }
+  thead th {
+    background: #f4f4f4;
+    font-weight: 600;
+  }
+</style>"""
+            html_body = css_block + "\n" + html_body
+
         # Build a minimal HTML document wrapping the converted markdown.
         html_content = f"""<!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
